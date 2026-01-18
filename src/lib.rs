@@ -508,7 +508,8 @@ where
         self.samples_since_reset = 0;
     }
 }
-Display Implementationimpl<T> fmt::Display for AdaptiveStats<T>
+
+impl<T> fmt::Display for AdaptiveStats<T>
 where
     T: fmt::Display + Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
 {
