@@ -530,6 +530,108 @@ where
     }
 }
 
+impl<T> Stats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    /// Creates a new stats object with a prior value (as if we had one sample)
+    pub fn with_prior(value: T) -> Stats<T> {
+        let mut stats = Stats::new();
+        stats.update(value);
+        stats
+    }
+
+    /// Sets a prior value, resetting all statistics as if this was the first sample
+    pub fn set_prior(&mut self, value: T) {
+        *self = Stats::new();
+        self.update(value);
+    }
+
+    /// Sets a prior with custom count (as if we had 'count' samples of this value)
+    pub fn set_prior_with_count(&mut self, value: T, count: usize) {
+        *self = Stats::new();
+        for _ in 0..count {
+            self.update(value);
+        }
+    }
+
+    /// Resets stats but keeps the same initial value as prior
+    pub fn reset_with_prior(&mut self, prior_value: T) {
+        let old_prior = self.mean; // Use current mean as reference
+        self.set_prior(prior_value);
+    }
+}
+
+impl<T> AdaptiveStats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    /// Creates new adaptive stats with a prior value
+    pub fn with_prior(prior_value: T) -> Self {
+        let mut stats = Self::new();
+        stats.set_prior(prior_value);
+        stats
+    }
+
+    /// Creates new adaptive stats with custom parameters and prior
+    pub fn with_params_and_prior(
+        prior_value: T,
+        base_alpha: T,
+        decay_factor: T,
+        alpha_min: T,
+        alpha_max: T,
+        volatility_sensitivity: T,
+        warmup_samples: usize
+    ) -> Self {
+        let mut stats = Self::with_params(
+            base_alpha, 
+            decay_factor, 
+            alpha_min, 
+            alpha_max, 
+            volatility_sensitivity, 
+            warmup_samples
+        );
+        stats.set_prior(prior_value);
+        stats
+    }
+
+    /// Sets a prior value, initializing all statistics
+    pub fn set_prior(&mut self, value: T) {
+        // Reset core stats with prior
+        self.core = Stats::with_prior(value);
+        
+        // Initialize enhanced metrics with the prior
+        let variance = T::zero(); // No variance with single sample
+        self.stable_variance = variance;
+        self.recent_variance = variance;
+        self.trend_factor = T::one();
+        self.stability_score = T::one();
+        self.current_alpha = self.base_alpha;
+        self.samples_since_reset = 1; // We have one sample (the prior)
+    }
+
+    /// Sets prior with estimated variance (useful for initialization)
+    pub fn set_prior_with_variance(&mut self, mean_value: T, variance_estimate: T) {
+        // Set the mean via prior
+        self.set_prior(mean_value);
+        
+        // Override the variance estimates
+        self.stable_variance = variance_estimate;
+        self.recent_variance = variance_estimate;
+        
+        // Update core std_dev to match
+        self.core.std_dev = variance_estimate.sqrt();
+        self.core.mean2 = variance_estimate; // For consistency
+    }
+
+    /// Reset but preserve current mean as prior
+    pub fn reset_with_current_as_prior(&mut self) {
+        let current_mean = self.core.mean;
+        let current_variance = self.stable_variance;
+        self.set_prior_with_variance(current_mean, current_variance);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
