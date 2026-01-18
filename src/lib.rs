@@ -259,7 +259,8 @@ pub struct AdaptiveStats<T: Float + Zero + One + AddAssign + FromPrimitive + Par
     samples_since_reset: usize,
     warmup_samples: usize,   // Samples needed before adaptive behavior kicks in
 }
-Implementação Coreimpl<T> Default for AdaptiveStats<T>
+
+impl<T> Default for AdaptiveStats<T>
 where
     T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
 {
