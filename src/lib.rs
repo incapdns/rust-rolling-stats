@@ -529,48 +529,6 @@ where
         )
     }
 }
-Uso no Seu Projeto Principal// No seu TickEngine:
-struct VolatilityTracker {
-    stats: AdaptiveStats<f64>,
-}
-
-impl VolatilityTracker {
-    fn new() -> Self {
-        Self {
-            stats: AdaptiveStats::with_params(
-                0.02,   // base_alpha
-                0.999,  // decay_factor
-                0.001,  // alpha_min  
-                0.10,   // alpha_max
-                2.0,    // volatility_sensitivity
-                100     // warmup_samples
-            )
-        }
-    }
-    
-    fn update(&mut self, innovation: f64, regime: Regime) {
-        let multiplier = match regime {
-            Regime::Trend => 0.7,    // Less reactive in trends
-            Regime::Noise => 1.5,    // More reactive in noise
-            Regime::Transition => 1.0,
-        };
-        
-        self.stats.update_with_multiplier(innovation, multiplier);
-    }
-    
-    // Interface limpa para o TickEngine
-    fn z_score(&self, value: f64) -> f64 {
-        self.stats.z_score_stable(value)
-    }
-    
-    fn spike_threshold(&self) -> f64 {
-        self.stats.percentile_approx(0.90)
-    }
-    
-    fn is_volatile_period(&self) -> bool {
-        self.stats.is_trending()
-    }
-}
 
 #[cfg(test)]
 mod tests {
