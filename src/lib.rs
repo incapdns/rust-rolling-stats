@@ -517,7 +517,7 @@ where
         let precision = f.precision().unwrap_or(3);
         
         write!(f, 
-            "(avg: {:.precision$$}, stable_std: {:.precision$$}, recent_std: {:.precision$$}, trend: {:.precision$$}, stability: {:.precision$$}, count: {}, alpha: {:.precision$$})",
+            "(avg: {:.precision$}, stable_std: {:.precision$}, recent_std: {:.precision$}, trend: {:.precision$}, stability: {:.precision$}, count: {}, alpha: {:.precision$})",
             self.mean(), 
             self.stable_std(), 
             self.recent_std(),
