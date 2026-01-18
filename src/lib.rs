@@ -231,6 +231,345 @@ where
     }
 }
 
+/// Extended stats with exponential decay and adaptive alpha
+/// Builds on top of the standard Welford algorithm
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug)]
+pub struct AdaptiveStats<T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug> {
+    /// Core Welford stats (unchanged)
+    core: Stats<T>,
+    
+    /// Exponential decay parameters
+    base_alpha: T,           // Base alpha (e.g., 0.02)
+    current_alpha: T,        // Current adaptive alpha
+    decay_factor: T,         // How much to decay old samples (e.g., 0.999)
+    
+    /// Adaptive alpha parameters  
+    alpha_min: T,            // Minimum alpha (e.g., 0.001)
+    alpha_max: T,            // Maximum alpha (e.g., 0.10)
+    volatility_sensitivity: T, // How much volatility affects alpha (e.g., 2.0)
+    
+    /// Enhanced outputs
+    stable_variance: T,      // Long-term stable variance baseline
+    recent_variance: T,      // Short-term recent variance
+    trend_factor: T,         // Recent/Stable ratio (1.0 = normal, >1 = trending)
+    stability_score: T,      // How stable recent samples are (0-1)
+    
+    /// Internal state
+    samples_since_reset: usize,
+    warmup_samples: usize,   // Samples needed before adaptive behavior kicks in
+}
+Implementação Coreimpl<T> Default for AdaptiveStats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> AdaptiveStats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    /// Create new adaptive stats with default parameters
+    pub fn new() -> Self {
+        Self::with_params(
+            T::from(0.02).unwrap(),   // base_alpha
+            T::from(0.999).unwrap(),  // decay_factor  
+            T::from(0.001).unwrap(),  // alpha_min
+            T::from(0.10).unwrap(),   // alpha_max
+            T::from(2.0).unwrap(),    // volatility_sensitivity
+            100                       // warmup_samples
+        )
+    }
+    
+    /// Create with custom parameters
+    pub fn with_params(
+        base_alpha: T,
+        decay_factor: T, 
+        alpha_min: T,
+        alpha_max: T,
+        volatility_sensitivity: T,
+        warmup_samples: usize
+    ) -> Self {
+        Self {
+            core: Stats::new(),
+            base_alpha,
+            current_alpha: base_alpha,
+            decay_factor,
+            alpha_min,
+            alpha_max,
+            volatility_sensitivity,
+            stable_variance: T::zero(),
+            recent_variance: T::zero(),
+            trend_factor: T::one(),
+            stability_score: T::one(),
+            samples_since_reset: 0,
+            warmup_samples,
+        }
+    }
+    
+    /// Standard update (uses base alpha)
+    pub fn update(&mut self, value: T) {
+        self.update_with_alpha(value, self.base_alpha)
+    }
+    
+    /// Update with custom alpha multiplier
+    /// multiplier: 1.0 = normal, >1.0 = more reactive, <1.0 = more stable
+    pub fn update_with_multiplier(&mut self, value: T, multiplier: T) {
+        let alpha = (self.base_alpha * multiplier)
+            .max(self.alpha_min)
+            .min(self.alpha_max);
+        self.update_with_alpha(value, alpha)
+    }
+    
+    /// Core update with explicit alpha
+    pub fn update_with_alpha(&mut self, value: T, alpha: T) {
+        // Update core stats with decay
+        self.update_core_with_decay(value, alpha);
+        
+        // Update enhanced metrics
+        self.update_enhanced_metrics(value);
+        
+        // Adapt alpha based on recent volatility
+        self.adapt_alpha();
+        
+        self.samples_since_reset += 1;
+    }
+    
+    /// Update with automatic alpha adaptation
+    /// The alpha adapts based on recent volatility vs stable baseline
+    pub fn update_adaptive(&mut self, value: T) {
+        self.update_with_alpha(value, self.current_alpha)
+    }
+}
+
+impl<T> AdaptiveStats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    fn update_core_with_decay(&mut self, value: T, alpha: T) {
+        if self.core.count == 0 {
+            // First sample - initialize normally
+            self.core.update(value);
+            self.stable_variance = T::zero();
+            self.recent_variance = T::zero();
+            return;
+        }
+        
+        // Apply exponential decay to existing stats
+        let decay = T::one() - alpha;
+        
+        // Decay the count (conceptually)
+        let effective_count = T::from(self.core.count).unwrap() * decay + T::one();
+        
+        // Update min/max normally
+        if value > self.core.max { self.core.max = value; }
+        if value < self.core.min { self.core.min = value; }
+        
+        // Exponentially decayed mean update
+        let delta = value - self.core.mean;
+        self.core.mean += alpha * delta;
+        
+        // Exponentially decayed variance update  
+        let delta2 = value - self.core.mean;
+        self.core.mean2 = self.core.mean2 * decay + alpha * delta * delta2;
+        
+        // Update standard deviation
+        if effective_count > T::one() {
+            self.core.std_dev = (self.core.mean2 / (effective_count - T::one())).sqrt();
+        }
+        
+        // Increment count (for compatibility)
+        self.core.count += 1;
+    }
+    
+    fn update_enhanced_metrics(&mut self, value: T) {
+        let alpha_stable = T::from(0.005).unwrap(); // Very slow for stable baseline
+        let alpha_recent = T::from(0.05).unwrap();  // Faster for recent
+        
+        let variance = if self.core.count > 1 {
+            let delta = value - self.core.mean;
+            delta * delta
+        } else {
+            T::zero()
+        };
+        
+        // Update stable baseline (very slow adaptation)
+        if self.samples_since_reset == 1 {
+            self.stable_variance = variance;
+        } else {
+            self.stable_variance = self.stable_variance * (T::one() - alpha_stable) + variance * alpha_stable;
+        }
+        
+        // Update recent variance (faster adaptation)
+        if self.samples_since_reset == 1 {
+            self.recent_variance = variance;
+        } else {
+            self.recent_variance = self.recent_variance * (T::one() - alpha_recent) + variance * alpha_recent;
+        }
+        
+        // Calculate trend factor
+        if self.stable_variance > T::zero() {
+            self.trend_factor = self.recent_variance / self.stable_variance;
+        }
+        
+        // Calculate stability score (inverse of trend factor, clamped)
+        self.stability_score = T::one() / (T::one() + (self.trend_factor - T::one()).abs());
+    }
+    
+    fn adapt_alpha(&mut self) {
+        if self.samples_since_reset < self.warmup_samples {
+            return; // Don't adapt during warmup
+        }
+        
+        // Higher volatility = higher alpha (more reactive)
+        // Lower volatility = lower alpha (more stable)
+        let volatility_ratio = if self.trend_factor > T::one() {
+            // Trending: increase alpha
+            (self.trend_factor - T::one()) * self.volatility_sensitivity + T::one()
+        } else {
+            // Stable: keep alpha low  
+            T::one() / ((T::one() - self.trend_factor) * self.volatility_sensitivity + T::one())
+        };
+        
+        self.current_alpha = (self.base_alpha * volatility_ratio)
+            .max(self.alpha_min)
+            .min(self.alpha_max);
+    }
+}
+
+impl<T> AdaptiveStats<T>
+where
+    T: Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    /// Get the core stats (for compatibility)
+    pub fn core(&self) -> &Stats<T> { &self.core }
+    
+    /// Standard getters (delegate to core)
+    pub fn count(&self) -> usize { self.core.count }
+    pub fn mean(&self) -> T { self.core.mean }
+    pub fn std_dev(&self) -> T { self.core.std_dev }
+    pub fn min(&self) -> T { self.core.min }
+    pub fn max(&self) -> T { self.core.max }
+    pub fn variance(&self) -> T { self.core.std_dev * self.core.std_dev }
+    
+    /// Enhanced getters
+    pub fn stable_std(&self) -> T { self.stable_variance.sqrt() }
+    pub fn stable_variance(&self) -> T { self.stable_variance }
+    pub fn recent_std(&self) -> T { self.recent_variance.sqrt() }
+    pub fn recent_variance(&self) -> T { self.recent_variance }
+    pub fn trend_factor(&self) -> T { self.trend_factor }
+    pub fn stability_score(&self) -> T { self.stability_score }
+    pub fn current_alpha(&self) -> T { self.current_alpha }
+    
+    /// Convenience methods
+    pub fn is_trending(&self) -> bool {
+        self.trend_factor > T::from(1.2).unwrap()
+    }
+    
+    pub fn is_stable(&self) -> bool {
+        self.stability_score > T::from(0.8).unwrap()
+    }
+    
+    /// Calculate Z-score using stable baseline
+    pub fn z_score_stable(&self, value: T) -> T {
+        if self.stable_variance > T::zero() {
+            (value - self.core.mean) / self.stable_std()
+        } else {
+            T::zero()
+        }
+    }
+    
+    /// Calculate percentile approximation (assumes normal distribution)
+    pub fn percentile_approx(&self, p: T) -> T {
+        // Simple approximation: mean + z_score * std
+        // For p=0.9 (90th percentile), z ≈ 1.28
+        let z_score = match p {
+            p if p >= T::from(0.95).unwrap() => T::from(1.96).unwrap(),  // 95%
+            p if p >= T::from(0.90).unwrap() => T::from(1.28).unwrap(),  // 90%
+            p if p >= T::from(0.75).unwrap() => T::from(0.67).unwrap(),  // 75%
+            _ => T::from(0.5).unwrap()  // ~60%
+        };
+        
+        self.core.mean + z_score * self.stable_std()
+    }
+    
+    /// Reset all state (keep parameters)
+    pub fn reset(&mut self) {
+        self.core = Stats::new();
+        self.current_alpha = self.base_alpha;
+        self.stable_variance = T::zero();
+        self.recent_variance = T::zero();
+        self.trend_factor = T::one();
+        self.stability_score = T::one();
+        self.samples_since_reset = 0;
+    }
+}
+Display Implementationimpl<T> fmt::Display for AdaptiveStats<T>
+where
+    T: fmt::Display + Float + Zero + One + AddAssign + FromPrimitive + PartialEq + Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let precision = f.precision().unwrap_or(3);
+        
+        write!(f, 
+            "(avg: {:.precision$$}, stable_std: {:.precision$$}, recent_std: {:.precision$$}, trend: {:.precision$$}, stability: {:.precision$$}, count: {}, alpha: {:.precision$$})",
+            self.mean(), 
+            self.stable_std(), 
+            self.recent_std(),
+            self.trend_factor(),
+            self.stability_score(),
+            self.count(),
+            self.current_alpha(),
+            precision = precision
+        )
+    }
+}
+Uso no Seu Projeto Principal// No seu TickEngine:
+struct VolatilityTracker {
+    stats: AdaptiveStats<f64>,
+}
+
+impl VolatilityTracker {
+    fn new() -> Self {
+        Self {
+            stats: AdaptiveStats::with_params(
+                0.02,   // base_alpha
+                0.999,  // decay_factor
+                0.001,  // alpha_min  
+                0.10,   // alpha_max
+                2.0,    // volatility_sensitivity
+                100     // warmup_samples
+            )
+        }
+    }
+    
+    fn update(&mut self, innovation: f64, regime: Regime) {
+        let multiplier = match regime {
+            Regime::Trend => 0.7,    // Less reactive in trends
+            Regime::Noise => 1.5,    // More reactive in noise
+            Regime::Transition => 1.0,
+        };
+        
+        self.stats.update_with_multiplier(innovation, multiplier);
+    }
+    
+    // Interface limpa para o TickEngine
+    fn z_score(&self, value: f64) -> f64 {
+        self.stats.z_score_stable(value)
+    }
+    
+    fn spike_threshold(&self) -> f64 {
+        self.stats.percentile_approx(0.90)
+    }
+    
+    fn is_volatile_period(&self) -> bool {
+        self.stats.is_trending()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
